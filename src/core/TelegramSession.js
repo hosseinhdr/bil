@@ -2,6 +2,9 @@ import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { Api } from 'telegram';
 import logger from '../utils/logger.js';
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
 
 class TelegramSession {
     constructor(name, sessionString, apiId, apiHash, isPremium = false) {
@@ -58,7 +61,7 @@ class TelegramSession {
             // Get current channels count
             await this.updateChannelsCount();
 
-            logger.info(`✅ ${this.name} connected successfully`); // استفاده از info به جای success
+            logger.info(`✅ ${this.name} connected successfully`);
             logger.info(`   Premium: ${this.isPremium ? 'Yes ⭐' : 'No'}`);
             logger.info(`   Channels: ${this.currentChannelsCount}/${this.maxChannels}`);
 
@@ -134,18 +137,25 @@ class TelegramSession {
             let result;
 
             // Handle different link formats
-            if (inviteLink.startsWith('https://t.me/joinchat/') || inviteLink.startsWith('https://t.me/+')) {
+            if (inviteLink.includes('t.me/joinchat/') || inviteLink.includes('t.me/+')) {
                 // Private channel with invite link
-                const hash = inviteLink.startsWith('https://t.me/+')
-                    ? inviteLink.split('+')[1]
-                    : inviteLink.split('/').pop();
+                let hash;
+
+                if (inviteLink.includes('t.me/+')) {
+                    hash = inviteLink.split('t.me/+')[1];
+                } else {
+                    hash = inviteLink.split('t.me/joinchat/')[1];
+                }
+
+                // Clean the hash
+                hash = hash.split('?')[0].split('/')[0].trim();
 
                 result = await this.client.invoke(
                     new Api.messages.ImportChatInvite({ hash })
                 );
             } else {
                 // Public channel
-                const username = inviteLink.replace('@', '').replace('https://t.me/', '');
+                const username = inviteLink.replace('@', '').replace('https://t.me/', '').split('?')[0];
                 const entity = await this.client.getEntity(username);
 
                 result = await this.client.invoke(
@@ -206,30 +216,278 @@ class TelegramSession {
         }
     }
 
+    /**
+     * Get channel info with profile photo
+     * Supports: numeric ID, username, public link, private invite link
+     */
     async getChannelInfo(channelIdentifier) {
         try {
-            const entity = await this.client.getEntity(channelIdentifier);
+            logger.info(`Getting channel info for: ${channelIdentifier}`);
 
-            // Get full channel info
-            const fullChannel = await this.client.invoke(
-                new Api.channels.GetFullChannel({ channel: entity })
-            );
+            let entity = null;
+            let channelInfo = {};
 
-            const channel = fullChannel.chats?.[0];
+            // 1. Handle numeric ID (channel ID or access hash)
+            if (/^-?\d+$/.test(channelIdentifier)) {
+                logger.info('Detected numeric ID format');
 
-            return {
-                id: channel.id?.toString(),
-                title: channel.title,
-                username: channel.username || null,
-                about: fullChannel.fullChat?.about || null,
-                participantsCount: fullChannel.fullChat?.participantsCount || 0,
-                isPublic: !!channel.username,
-                sessionName: this.name
-            };
+                try {
+                    // Try different ID formats
+                    let channelId = channelIdentifier;
+
+                    // If it doesn't start with -, try adding -100 prefix (supergroup format)
+                    if (!channelId.startsWith('-')) {
+                        // Try with -100 prefix first (most common for channels/supergroups)
+                        try {
+                            const superGroupId = `-100${channelId}`;
+                            entity = await this.client.getEntity(superGroupId);
+                            logger.info(`Found channel with ID: ${superGroupId}`);
+                        } catch (e) {
+                            // If that fails, try with just negative
+                            try {
+                                const negativeId = `-${channelId}`;
+                                entity = await this.client.getEntity(negativeId);
+                                logger.info(`Found channel with ID: ${negativeId}`);
+                            } catch (e2) {
+                                // Try as is
+                                entity = await this.client.getEntity(channelId);
+                                logger.info(`Found channel with ID: ${channelId}`);
+                            }
+                        }
+                    } else {
+                        entity = await this.client.getEntity(channelId);
+                    }
+                } catch (error) {
+                    logger.error(`Failed to get entity by ID: ${error.message}`);
+
+                    // Try to find in dialogs
+                    const dialogs = await this.client.getDialogs({ limit: 1000 });
+                    const targetId = channelIdentifier.replace('-100', '').replace('-', '');
+
+                    for (const dialog of dialogs) {
+                        if (dialog.entity?.id?.toString() === targetId ||
+                            dialog.entity?.id?.toString() === `-${targetId}` ||
+                            dialog.entity?.id?.toString() === `-100${targetId}`) {
+                            entity = dialog.entity;
+                            logger.info('Found channel in dialogs');
+                            break;
+                        }
+                    }
+
+                    if (!entity) {
+                        throw new Error(`Channel with ID ${channelIdentifier} not found. Make sure you're a member of this channel.`);
+                    }
+                }
+            }
+
+            // 2. Handle invite links
+            else if (channelIdentifier.includes('t.me/joinchat/') || channelIdentifier.includes('t.me/+')) {
+                logger.info('Detected invite link format');
+
+                let hash;
+                if (channelIdentifier.includes('t.me/+')) {
+                    hash = channelIdentifier.split('t.me/+')[1];
+                } else {
+                    hash = channelIdentifier.split('t.me/joinchat/')[1];
+                }
+
+                // Clean the hash
+                hash = hash.split('?')[0].split('/')[0].trim();
+                logger.info(`Checking invite with hash: ${hash}`);
+
+                try {
+                    const inviteResult = await this.client.invoke(
+                        new Api.messages.CheckChatInvite({ hash })
+                    );
+
+                    logger.info(`Invite check result: ${inviteResult.className}`);
+
+                    if (inviteResult.className === 'ChatInviteAlready') {
+                        // We're already a member
+                        const chat = inviteResult.chat;
+
+                        try {
+                            // Try to get full channel info
+                            const fullChannel = await this.client.invoke(
+                                new Api.channels.GetFullChannel({ channel: chat })
+                            );
+
+                            const channel = fullChannel.chats?.[0];
+
+                            channelInfo = {
+                                id: channel.id?.toString(),
+                                title: channel.title,
+                                username: channel.username || null,
+                                about: fullChannel.fullChat?.about || null,
+                                participantsCount: fullChannel.fullChat?.participantsCount || 0,
+                                isPublic: false,
+                                isPrivate: true,
+                                sessionName: this.name,
+                                profilePhotoPath: null,
+                                isMember: true
+                            };
+
+                            // Try to download photo
+                            if (channel.photo) {
+                                try {
+                                    channelInfo.profilePhotoPath = await this.downloadChannelPhoto(chat, channel.id);
+                                } catch (photoError) {
+                                    logger.error(`Failed to download photo: ${photoError.message}`);
+                                }
+                            }
+
+                            return channelInfo;
+
+                        } catch (fullError) {
+                            logger.error(`Failed to get full channel: ${fullError.message}`);
+
+                            // Return basic info
+                            return {
+                                id: chat.id?.toString(),
+                                title: chat.title,
+                                username: null,
+                                about: null,
+                                participantsCount: chat.participantsCount || 0,
+                                isPublic: false,
+                                isPrivate: true,
+                                sessionName: this.name,
+                                profilePhotoPath: null,
+                                isMember: true
+                            };
+                        }
+
+                    } else if (inviteResult.className === 'ChatInvite') {
+                        // Not a member - return preview
+                        return {
+                            id: null,
+                            title: inviteResult.title,
+                            about: inviteResult.about || null,
+                            participantsCount: inviteResult.participantsCount || 0,
+                            isPublic: inviteResult.isPublic || false,
+                            isPrivate: !inviteResult.isPublic,
+                            isBroadcast: inviteResult.broadcast || false,
+                            isMegagroup: inviteResult.megagroup || false,
+                            isVerified: inviteResult.verified || false,
+                            sessionName: this.name,
+                            profilePhotoPath: null,
+                            preview: true,
+                            needsToJoin: true,
+                            inviteHash: hash,
+                            isMember: false
+                        };
+                    }
+
+                } catch (inviteError) {
+                    logger.error(`Invite check error: ${inviteError.message}`);
+
+                    if (inviteError.message.includes('INVITE_HASH_INVALID')) {
+                        throw new Error('Invalid invite link');
+                    } else if (inviteError.message.includes('INVITE_HASH_EXPIRED')) {
+                        throw new Error('Invite link has expired');
+                    }
+
+                    throw inviteError;
+                }
+            }
+
+            // 3. Handle public links and usernames
+            else if (channelIdentifier.includes('t.me/')) {
+                logger.info('Detected public link format');
+                const username = channelIdentifier.split('t.me/')[1].split('?')[0].split('/')[0];
+                entity = await this.client.getEntity(username);
+            }
+            else if (channelIdentifier.startsWith('@')) {
+                logger.info('Detected username with @ format');
+                entity = await this.client.getEntity(channelIdentifier);
+            }
+            else {
+                logger.info('Assuming username without @ format');
+                entity = await this.client.getEntity(channelIdentifier);
+            }
+
+            // If we have entity, get full channel info
+            if (entity) {
+                logger.info('Getting full channel info for entity');
+
+                const fullChannel = await this.client.invoke(
+                    new Api.channels.GetFullChannel({ channel: entity })
+                );
+
+                const channel = fullChannel.chats?.[0];
+
+                channelInfo = {
+                    id: channel.id?.toString(),
+                    title: channel.title,
+                    username: channel.username || null,
+                    about: fullChannel.fullChat?.about || null,
+                    participantsCount: fullChannel.fullChat?.participantsCount || 0,
+                    isPublic: !!channel.username,
+                    isPrivate: !channel.username,
+                    sessionName: this.name,
+                    profilePhotoPath: null,
+                    isMember: true
+                };
+
+                // Download profile photo if exists
+                if (channel.photo) {
+                    try {
+                        channelInfo.profilePhotoPath = await this.downloadChannelPhoto(entity, channel.id);
+                    } catch (photoError) {
+                        logger.error(`Failed to download profile photo: ${photoError.message}`);
+                    }
+                }
+            }
+
+            return channelInfo;
 
         } catch (error) {
-            logger.error(`${this.name} failed to get channel info:`, error.message);
+            logger.error(`${this.name} failed to get channel info: ${error.message}`);
             throw error;
+        }
+    }
+
+    /**
+     * Download channel profile photo to temp file
+     */
+    async downloadChannelPhoto(entity, channelId) {
+        try {
+            // Create temp directory if not exists
+            const tempDir = path.join(os.tmpdir(), 'telegram-channel-photos');
+            await fs.mkdir(tempDir, { recursive: true });
+
+            // Generate unique filename
+            const timestamp = Date.now();
+            const photoPath = path.join(tempDir, `channel_${channelId}_${timestamp}.jpg`);
+
+            // Download the photo
+            const buffer = await this.client.downloadProfilePhoto(entity, {
+                isBig: true
+            });
+
+            if (buffer) {
+                // Save to file
+                await fs.writeFile(photoPath, buffer);
+
+                logger.info(`✅ Profile photo saved to: ${photoPath}`);
+
+                // Schedule deletion after 1 hour
+                setTimeout(async () => {
+                    try {
+                        await fs.unlink(photoPath);
+                        logger.debug(`Deleted temp photo: ${photoPath}`);
+                    } catch (err) {
+                        // File might already be deleted
+                    }
+                }, 3600000); // 1 hour
+
+                return photoPath;
+            }
+
+            return null;
+
+        } catch (error) {
+            logger.error('Failed to download channel photo:', error.message);
+            return null;
         }
     }
 
