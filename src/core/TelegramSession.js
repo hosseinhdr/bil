@@ -142,13 +142,19 @@ class TelegramSession {
                 let hash;
 
                 if (inviteLink.includes('t.me/+')) {
-                    hash = inviteLink.split('t.me/+')[1];
+                    // Extract hash from t.me/+hash format
+                    const parts = inviteLink.split('t.me/+');
+                    hash = parts[1];
                 } else {
-                    hash = inviteLink.split('t.me/joinchat/')[1];
+                    // Extract hash from t.me/joinchat/hash format
+                    const parts = inviteLink.split('t.me/joinchat/');
+                    hash = parts[1];
                 }
 
-                // Clean the hash
+                // Clean the hash - remove any query parameters or additional path
                 hash = hash.split('?')[0].split('/')[0].trim();
+
+                logger.info(`Attempting to join with hash: ${hash}`);
 
                 result = await this.client.invoke(
                     new Api.messages.ImportChatInvite({ hash })
@@ -280,19 +286,39 @@ class TelegramSession {
                 }
             }
 
-            // 2. Handle invite links
+            // 2. Handle invite links (both formats: t.me/joinchat/hash and t.me/+hash)
             else if (channelIdentifier.includes('t.me/joinchat/') || channelIdentifier.includes('t.me/+')) {
                 logger.info('Detected invite link format');
 
                 let hash;
+
+                // Extract hash from URL
                 if (channelIdentifier.includes('t.me/+')) {
-                    hash = channelIdentifier.split('t.me/+')[1];
+                    // Format: https://t.me/+hash or t.me/+hash
+                    const parts = channelIdentifier.split('t.me/+');
+                    if (parts.length > 1) {
+                        hash = parts[1];
+                    } else {
+                        throw new Error('Invalid invite link format');
+                    }
+                } else if (channelIdentifier.includes('t.me/joinchat/')) {
+                    // Format: https://t.me/joinchat/hash or t.me/joinchat/hash
+                    const parts = channelIdentifier.split('t.me/joinchat/');
+                    if (parts.length > 1) {
+                        hash = parts[1];
+                    } else {
+                        throw new Error('Invalid invite link format');
+                    }
                 } else {
-                    hash = channelIdentifier.split('t.me/joinchat/')[1];
+                    throw new Error('Invalid invite link format');
                 }
 
-                // Clean the hash
-                hash = hash.split('?')[0].split('/')[0].trim();
+                // Clean the hash - remove any query parameters, fragments, or additional path
+                hash = hash.split('?')[0].split('#')[0].split('/')[0].trim();
+
+                // Remove any URL encoding issues
+                hash = decodeURIComponent(hash);
+
                 logger.info(`Checking invite with hash: ${hash}`);
 
                 try {
@@ -381,7 +407,7 @@ class TelegramSession {
                     logger.error(`Invite check error: ${inviteError.message}`);
 
                     if (inviteError.message.includes('INVITE_HASH_INVALID')) {
-                        throw new Error('Invalid invite link');
+                        throw new Error('Invalid invite link - the link may be expired or incorrect');
                     } else if (inviteError.message.includes('INVITE_HASH_EXPIRED')) {
                         throw new Error('Invite link has expired');
                     }
@@ -393,7 +419,23 @@ class TelegramSession {
             // 3. Handle public links and usernames
             else if (channelIdentifier.includes('t.me/')) {
                 logger.info('Detected public link format');
-                const username = channelIdentifier.split('t.me/')[1].split('?')[0].split('/')[0];
+
+                // Extract username from t.me/username format
+                let username;
+                const parts = channelIdentifier.split('t.me/');
+
+                if (parts.length > 1) {
+                    username = parts[1].split('?')[0].split('#')[0].split('/')[0].trim();
+                } else {
+                    throw new Error('Invalid public link format');
+                }
+
+                // Make sure it's not an invite link that we missed
+                if (username.startsWith('+') || username === 'joinchat') {
+                    throw new Error('This appears to be an invite link. Please check the format.');
+                }
+
+                logger.info(`Attempting to get entity for username: ${username}`);
                 entity = await this.client.getEntity(username);
             }
             else if (channelIdentifier.startsWith('@')) {
