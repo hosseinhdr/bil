@@ -2,122 +2,47 @@ require('dotenv').config();
 
 class Config {
     constructor() {
-        // Validate and load environment variables
         this.validateEnvironment();
 
-        // Telegram configuration
-        this.apiId = this.parseIntSafe(process.env.API_ID, 'API_ID');
-        this.apiHash = this.requireEnv('API_HASH');
+        // Telegram
+        this.apiId = parseInt(process.env.API_ID);
+        this.apiHash = process.env.API_HASH;
         this.sessionPath = process.env.SESSION_PATH;
         this.observerTgUserId = process.env.OBSERVER_TELEGRAM_USER_ID;
 
-        // Database configuration
+        // Database
         this.dbConfig = {
-            host: process.env.DB_HOST ,
-            port: this.parseIntSafe(process.env.DB_PORT_WRITE, 'DB_PORT_WRITE', 3306),
-            user: process.env.DB_USER ,
-            password: process.env.DB_PASS ,
-            database: process.env.DB_NAME
+            host: process.env.DB_HOST || 'localhost',
+            port: parseInt(process.env.DB_PORT_WRITE) || 3306,
+            user: process.env.DB_USER || 'root',
+            password: process.env.DB_PASS || '',
+            database: process.env.DB_NAME || 'telegram_db'
         };
 
-        // Admin configuration
-        this.adminUsername = this.requireEnv('ADMIN_USERNAME');
+        // Notifications
+        this.adminUsername = process.env.ADMIN_USERNAME;
+        this.adsChannelId = process.env.ADS_CHANNEL_ID || this.adminUsername;
+        this.viewsChannelId = process.env.VIEWS_CHANNEL_ID || this.adminUsername;
+        this.deletionsChannelId = process.env.DELETIONS_CHANNEL_ID || this.adminUsername;
 
-        // Application settings
-        this.logLevel = process.env.LOG_LEVEL || 'ERROR';
+        // Service settings
+        this.updateInterval = parseInt(process.env.UPDATE_INTERVAL) || 15;
+        this.statusReportInterval = parseInt(process.env.STATUS_REPORT_INTERVAL) || 60; // minutes
+
+        // Logging
+        this.logLevel = process.env.LOG_LEVEL || 'info';
+        this.logConsole = process.env.LOG_CONSOLE === 'true';
         this.environment = process.env.NODE_ENV || 'production';
-
-        // Display loaded configuration (without sensitive data)
-        this.displayConfig();
     }
 
     validateEnvironment() {
-        const required = ['API_ID', 'API_HASH', 'ADMIN_USERNAME','SESSION_PATH','DB_USER' , 'DB_PASS', 'DB_HOST' , 'DB_NAME'];
-        const missing = [];
-
-        for (const key of required) {
-            if (!process.env[key]) {
-                missing.push(key);
-            }
-        }
+        const required = ['API_ID', 'API_HASH', 'ADMIN_USERNAME', 'SESSION_PATH'];
+        const missing = required.filter(key => !process.env[key]);
 
         if (missing.length > 0) {
-            console.error('=====================================');
-            console.error('ERROR: Missing required environment variables:');
-            missing.forEach(key => console.error(`  - ${key}`));
-            console.error('=====================================');
-            console.error('Please set these variables in your .env file');
+            console.error('Missing required environment variables:', missing);
             process.exit(1);
         }
-    }
-
-    requireEnv(key, defaultValue = null) {
-        const value = process.env[key];
-
-        if (!value && defaultValue === null) {
-            console.error(`ERROR: Required environment variable ${key} is not set`);
-            process.exit(1);
-        }
-
-        return value || defaultValue;
-    }
-
-    parseIntSafe(value, name, defaultValue = null) {
-        if (!value) {
-            if (defaultValue !== null) {
-                return defaultValue;
-            }
-            console.error(`ERROR: ${name} is required but not set`);
-            process.exit(1);
-        }
-
-        const parsed = parseInt(value);
-
-        if (isNaN(parsed)) {
-            console.error(`ERROR: ${name} must be a valid number, got: ${value}`);
-            process.exit(1);
-        }
-
-        return parsed;
-    }
-
-    displayConfig() {
-        console.log('=====================================');
-        console.log('Configuration loaded:');
-        console.log('-------------------------------------');
-        console.log('Telegram:');
-        console.log(`  API ID: ${this.apiId}`);
-        console.log(`  Session Path: ${this.sessionPath}`);
-        console.log('-------------------------------------');
-        console.log('Database:');
-        console.log(`  Host: ${this.dbConfig.host}`);
-        console.log(`  Port: ${this.dbConfig.port}`);
-        console.log(`  User: ${this.dbConfig.user}`);
-        console.log(`  Database: ${this.dbConfig.database}`);
-        console.log('-------------------------------------');
-        console.log('Application:');
-        console.log(`  Admin: ${this.adminUsername}`);
-        console.log(`  Log Level: ${this.logLevel}`);
-        console.log(`  Environment: ${this.environment}`);
-        console.log('=====================================\n');
-    }
-
-    // Get configuration as object (for debugging)
-    toObject() {
-        return {
-            apiId: this.apiId,
-            apiHash: '***hidden***',
-            sessionPath: this.sessionPath,
-            adminUsername: this.adminUsername,
-            database: {
-                host: this.dbConfig.host,
-                port: this.dbConfig.port,
-                user: this.dbConfig.user,
-                database: this.dbConfig.database
-            },
-            logLevel: this.logLevel,
-            environment: this.environment
-        };
     }
 }
 
